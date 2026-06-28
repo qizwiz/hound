@@ -34,6 +34,10 @@ from analysis.concurrent_knowledge import Evidence, Hypothesis, HypothesisStore
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _CEX = re.compile(r"Counterexample:\s*\n?(.*?)(?:\n\s*\n|\n\s*\[|\n\s*Symbolic test result|\Z)", re.S)
+# Known limitation: this captures only bare `name = 0x.. / decimal` model lines. Exotic halmos
+# renderings (empty bytes `0x`, selector-name values) are dropped, so the witness text may degrade to
+# "(not parsed)". This is a fidelity loss only -- the VIOLATED verdict is driven by the [FAIL] line,
+# never by witness parsing, so a real violation is still recorded.
 _WITNESS = re.compile(r"^\s*\S+\s*=\s*(?:0x[0-9a-fA-F]+|\d+)\s*$")
 # per-function result boundaries, used to scope a counterexample to its own function's block
 _BOUNDARY = re.compile(r"\[(?:FAIL|PASS)\]|Running \d+ test|Symbolic test result")
