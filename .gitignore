@@ -18,3 +18,8 @@ poetry.lock
 
 # IDE
 .vscode/
+
+# local dev
+.venv/
+examples/fv_demo/out/
+examples/fv_demo/cache/

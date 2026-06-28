@@ -269,11 +269,39 @@ class HypothesisStore(ConcurrentFileStore):
             # Only the finalize agent can set status to "confirmed"
             if confidence <= 0.1:
                 hyp["status"] = "rejected"
-            
+
             return data, True
-        
+
         return self.update_atomic(update)
-    
+
+    def confirm_from_verifier(self, hypothesis_id: str, evidence: Evidence, verifier_name: str) -> bool:
+        """Confirm a hypothesis on SOUND evidence from a formal verifier.
+
+        The analysis-agent path (add_evidence/adjust_confidence) deliberately cannot set
+        'confirmed': LLM evidence is fallible, so only the finalize agent confirms it. A formal
+        verifier is the exception -- a symbolic-execution counterexample is a concrete witness,
+        ground truth, not a confidence score. This path lets such *verified* evidence confirm
+        directly and tags the hypothesis (verified=True, verified_by=<tool>) so it stays auditable
+        and distinct from LLM-confirmed findings. Use ONLY for evidence backed by a sound oracle.
+        """
+        def update(data):
+            if hypothesis_id not in data["hypotheses"]:
+                return data, False
+            hyp = data["hypotheses"][hypothesis_id]
+            evidence.created_by = evidence.created_by or verifier_name
+            hyp["evidence"].append(asdict(evidence))
+            hyp["status"] = "confirmed"
+            hyp["confidence"] = 1.0
+            hyp["verified"] = True
+            hyp["verified_by"] = verifier_name
+            data["metadata"]["confirmed"] = sum(
+                1 for h in data["hypotheses"].values() if h.get("status") == "confirmed"
+            )
+            data["metadata"]["last_modified"] = datetime.now().isoformat()
+            return data, True
+
+        return self.update_atomic(update)
+
     def get_by_node(self, node_id: str) -> list[dict]:
         """Get hypotheses for a node."""
         lock = self._acquire_lock()
