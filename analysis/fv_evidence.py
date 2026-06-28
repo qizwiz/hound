@@ -7,26 +7,21 @@ Hound's belief lifecycle treats every evidence source as fallible: the analysis 
 confidence, not a fact.
 
 A formal verifier is the exception. When Halmos (symbolic EVM execution) returns a
-*counterexample*, it is a concrete input that provably violates a property -- ground truth, not a
-guess. This module runs a Halmos check over a function and, ON A COUNTEREXAMPLE, records it in the
-HypothesisStore as a *verified* finding allowed to confirm (via the new
-HypothesisStore.confirm_from_verifier path). If Halmos finds no counterexample it writes nothing:
-the FV source never speculates, so it can only ever raise precision, never lower it.
+*counterexample for the requested function*, it is a concrete input that provably violates a
+property -- ground truth, not a guess. This module runs a Halmos check over a function and, ON A
+COUNTEREXAMPLE FOR THAT FUNCTION, records it in the HypothesisStore as a *verified* finding allowed
+to confirm (via HypothesisStore.confirm_from_verifier).
 
-This is the FV plug-in slot envisioned in the hound paper (Section 2.5), realized as a ~1-file,
-additive evidence source. The existing LLM lifecycle is untouched.
+Soundness invariants (these are the whole point):
+  - It distinguishes three outcomes -- VIOLATED / HELD / ERROR -- and never reports "held" when the
+    check did not actually run (a typo'd workdir, an unbuilt contract, or a missing function are
+    ERROR, not a silent pass).
+  - It binds a counterexample to the EXACT function requested (halmos --function is a prefix match,
+    so it reads the [FAIL] <function> line, not just the first counterexample block).
+  - It only ever records a sound finding, and reports success only if the store actually confirmed.
 
-Usage:
-    from analysis.concurrent_knowledge import HypothesisStore
-    from analysis.fv_evidence import run_halmos, HalmosFinding, record_finding
-
-    cex = run_halmos(workdir="examples/fv_demo", function="check_invariant")
-    if cex:
-        record_finding(store, HalmosFinding(
-            property="totalSupply conserved across mint/burn",
-            function="check_invariant", node_ref="func_MiniTokenBug.burn",
-            severity="high", counterexample=cex,
-            argv="halmos --function check_invariant"))
+This is the FV plug-in slot envisioned in the hound paper (Section 2.5), as an additive evidence
+source. The existing LLM lifecycle is untouched.
 """
 from __future__ import annotations
 
@@ -37,7 +32,6 @@ from dataclasses import dataclass
 
 from analysis.concurrent_knowledge import Evidence, Hypothesis, HypothesisStore
 
-# A real Halmos counterexample block: "Counterexample:\n    p_a_... = 0x..\n    ..."
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _CEX = re.compile(r"Counterexample:\s*\n?(.*?)(?:\n\s*\n|\n\s*\[|\n\s*Symbolic test result|\Z)", re.S)
 _WITNESS = re.compile(r"^\s*\S+\s*=\s*(?:0x[0-9a-fA-F]+|\d+)\s*$")
@@ -54,40 +48,98 @@ class HalmosFinding:
     argv: str            # the exact command, for replay
 
 
-def run_halmos(workdir: str, function: str, contract: str | None = None,
-               timeout: int = 240) -> str | None:
-    """Run one Halmos check; return the verbatim counterexample block, or None if it PASSED.
+@dataclass
+class HalmosResult:
+    """Outcome of running one Halmos check, with the three outcomes kept distinct."""
+    status: str                       # "violated" | "held" | "error"
+    counterexample: str | None = None  # set only when status == "violated"
+    detail: str = ""                  # human-readable reason for "error"/"held"
 
-    None means 'no sound violation' -- callers then write nothing. A non-None return is a concrete
-    witness, not a confidence.
+
+def _extract_counterexample(out: str, function: str) -> str | None:
+    """Return the witness for THIS function's counterexample, or None.
+
+    halmos --function is a prefix match, so the output may contain several functions' results. We
+    locate the `[FAIL] <function>` line and take the counterexample block immediately preceding it,
+    so a violation is never mis-attributed to a different function.
+    """
+    fail = re.search(rf"\[FAIL\]\s+{re.escape(function)}\b", out)
+    if not fail:
+        return None
+    head = out[: fail.start()]
+    block = None
+    for m in _CEX.finditer(head):
+        block = m  # the last counterexample before this function's FAIL line is its own
+    if not block:
+        return None
+    witness = [ln.strip() for ln in block.group(1).splitlines() if _WITNESS.match(ln)]
+    return "\n".join(witness) if witness else None
+
+
+def run_halmos(workdir: str, function: str, contract: str | None = None,
+               timeout: int = 240) -> HalmosResult:
+    """Run one Halmos check and classify the outcome as violated / held / error.
+
+    error  = the check did not actually run (no tool, crash, or the requested function never
+             executed -- e.g. bad workdir, unbuilt contract, wrong name). NOT a pass.
+    held   = the requested function ran and passed (no counterexample).
+    violated = the requested function produced a concrete counterexample (sound).
     """
     if shutil.which("uvx") is None:
-        return None  # halmos is an optional runtime tool; its absence is not a finding
+        return HalmosResult("error", detail="`uvx` (halmos) not found on PATH")
     argv = ["uvx", "halmos", "--function", function]
     if contract:
         argv += ["--contract", contract]
     try:
         r = subprocess.run(argv, cwd=workdir, capture_output=True, text=True, timeout=timeout)
-    except Exception:  # tool failure / timeout is not a finding
-        return None
+    except Exception as e:  # tool failure / timeout: not a pass
+        return HalmosResult("error", detail=f"halmos failed to run: {e}")
+
     out = _ANSI.sub("", (r.stdout or "") + (r.stderr or ""))
-    m = _CEX.search(out)
-    if not m:
-        return None
-    # keep only the model-assignment lines (name = 0x.. / name = 123); drop tool/lint noise
-    witness = [ln.strip() for ln in m.group(1).splitlines() if _WITNESS.match(ln)]
-    return "\n".join(witness) if witness else None
+    ran_fail = re.search(rf"\[FAIL\]\s+{re.escape(function)}\b", out)
+    ran_pass = re.search(rf"\[PASS\]\s+{re.escape(function)}\b", out)
+
+    if ran_fail:
+        cex = _extract_counterexample(out, function)
+        if cex:
+            return HalmosResult("violated", counterexample=cex)
+        # halmos reported FAIL for our function but we could not parse a model -- still a violation,
+        # but be honest the witness is unparsed rather than silently dropping it.
+        return HalmosResult("violated", counterexample="(halmos reported a violation; witness not parsed)")
+    if ran_pass:
+        return HalmosResult("held")
+    return HalmosResult(
+        "error",
+        detail=(f"halmos did not execute '{function}' (check --workdir, run `forge build`, and the "
+                f"--function/--contract names). Exit code {r.returncode}."),
+    )
+
+
+def _existing_id_by_title(store: HypothesisStore, title: str) -> str | None:
+    """Recover the id of an existing hypothesis with this exact title (propose() dedups by title)."""
+    low = title.lower()
+    for h in store.list_all():
+        if (h.get("title") or "").lower() == low:
+            return h.get("id")
+    return None
+
+
+def _status_of(store: HypothesisStore, hyp_id: str) -> str:
+    for h in store.list_all():
+        if h.get("id") == hyp_id:
+            return str(h.get("status", "unknown"))
+    return "absent"
 
 
 def record_finding(store: HypothesisStore, finding: HalmosFinding, *, confirm: bool = True) -> tuple[str, str]:
     """Write a verified Halmos finding into hound's belief store. Returns (hypothesis_id, status).
 
-    confirm=True (default): a sound counterexample sets status='confirmed' via the verified path.
-    confirm=False: it is recorded as strong supporting evidence and left for the finalize agent,
-    preserving hound's default lifecycle for operators who want a human/finalize gate on top.
+    The node id is in the title, so distinct nodes never collide; a re-run on the same node dedups to
+    the same hypothesis. The returned status reflects what the store ACTUALLY did (it never claims
+    'confirmed' when the underlying write was a no-op), so the caller can trust it.
     """
     hyp = Hypothesis(
-        title=f"[halmos] {finding.property} violated in {finding.function}",
+        title=f"[halmos] {finding.property} violated in {finding.function} ({finding.node_ref})",
         description=("Symbolic execution found a concrete input that violates the property "
                      f"`{finding.property}`. This is a sound counterexample, not an LLM conjecture."),
         vulnerability_type="invariant_violation",
@@ -99,7 +151,14 @@ def record_finding(store: HypothesisStore, finding: HalmosFinding, *, confirm: b
         created_by="halmos",
     )
     ok, ret = store.propose(hyp)
-    hyp_id = ret if ok else hyp.id  # on duplicate-title, the stable id is the same content hash
+    if ok:
+        hyp_id = ret
+    else:
+        # propose() rejected -- recover the EXISTING hypothesis id (it dedups by title), so we
+        # augment/confirm the real record rather than a non-existent content hash.
+        hyp_id = _existing_id_by_title(store, hyp.title)
+        if hyp_id is None:
+            return "", "error"
 
     evidence = Evidence(
         description=f"halmos counterexample (sound): {finding.counterexample}",
@@ -109,7 +168,9 @@ def record_finding(store: HypothesisStore, finding: HalmosFinding, *, confirm: b
         created_by="halmos",
     )
     if confirm:
-        store.confirm_from_verifier(hyp_id, evidence, verifier_name="halmos")
-        return hyp_id, "confirmed"
-    store.add_evidence(hyp_id, evidence)
-    return hyp_id, "investigating"
+        if store.confirm_from_verifier(hyp_id, evidence, verifier_name="halmos"):
+            return hyp_id, "confirmed"
+        return hyp_id, "error"
+    if not store.add_evidence(hyp_id, evidence):
+        return hyp_id, "error"
+    return hyp_id, _status_of(store, hyp_id)

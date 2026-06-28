@@ -342,7 +342,7 @@ A reasoning model reviews all hypotheses and updates their status based on evide
 
 #### Optional: confirm by formal verification
 
-`finalize` confirms by LLM judgement. If you have a Halmos (symbolic EVM) check for a property, `hound verify` confirms by **sound counterexample** instead: it runs the check against a real graph node and, **only if Halmos finds a concrete violation**, records an auto-confirmed `verified` finding (tagged `verified_by: halmos`) in the same hypothesis store — so it flows into `hound report` like any other confirmed finding. On a passing check it records nothing.
+`finalize` confirms by LLM judgement. If you have a Halmos (symbolic EVM) check for a property, `hound verify` confirms by **sound counterexample** instead: it runs the check against a real graph node and, **only if Halmos finds a concrete violation for that function**, records an auto-confirmed finding (status `confirmed`, marked `verified_by: halmos` in the store) titled `[halmos] …`, so it appears in `hound report` alongside the LLM-confirmed findings. If the check passes it records nothing; if Halmos cannot run (bad workdir, unbuilt contract, unknown function) it **errors** rather than reporting a false pass.
 
 ```bash
 # Foundry + halmos are optional runtime tools (not Hound dependencies)

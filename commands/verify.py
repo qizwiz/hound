@@ -2,17 +2,17 @@
 Verify command: confirm a hypothesis with a SOUND formal-verification counterexample.
 
 `hound verify` runs a user-provided Halmos (symbolic EVM) check against a real graph node and,
-ONLY on a concrete counterexample, records an auto-confirmed `verified` finding in the project's
-hypothesis store. It is the formal-verification evidence source from the paper (Section 2.5).
+ONLY on a concrete counterexample for that function, records an auto-confirmed `verified` finding in
+the project's hypothesis store. It is the formal-verification evidence source from the paper
+(Section 2.5).
 
 This is a second, explicitly-tagged confirm channel that sits alongside `finalize`:
   - finalize confirms LLM beliefs by judgement (the existing gate; unchanged here);
-  - verify confirms by sound counterexample, via HypothesisStore.confirm_from_verifier
-    (status='confirmed', verified_by='halmos').
+  - verify confirms by sound counterexample, via HypothesisStore.confirm_from_verifier.
 Two confirm provenances, one status, distinguishable by `verified_by`.
 
-On a passing check (or if Halmos/uvx is not installed) it records NOTHING -- the source never
-speculates, so it can only ever raise precision.
+It distinguishes "the property holds" from "the check never ran": a typo'd workdir, an unbuilt
+contract, or a missing function is an ERROR (non-zero exit), never a silent pass.
 """
 
 import json
@@ -29,11 +29,10 @@ from commands.project import ProjectManager
 console = Console()
 
 
-def _graph_node_ids(project_dir: Path) -> list[dict]:
+def _graph_nodes(project_dir: Path) -> list[dict]:
     """Return all graph nodes across the project's graphs/graph_*.json files."""
     nodes: list[dict] = []
-    graphs_dir = project_dir / "graphs"
-    for gf in sorted(graphs_dir.glob("graph_*.json")):
+    for gf in sorted((project_dir / "graphs").glob("graph_*.json")):
         try:
             data = json.loads(gf.read_text())
         except (OSError, json.JSONDecodeError):
@@ -43,12 +42,8 @@ def _graph_node_ids(project_dir: Path) -> list[dict]:
 
 
 def _validate_node_id(project_dir: Path, node: str) -> str:
-    """Require that --node is a REAL id present in the project's graphs.
-
-    Never fabricates a binding: if the id is not in any graphs/graph_*.json, error (and list the
-    available function nodes) rather than recording a finding that dangles off a non-existent node.
-    """
-    ids = {str(n.get("id")) for n in _graph_node_ids(project_dir) if n.get("id")}
+    """Require that --node is a REAL id present in the project's graphs (never fabricate a binding)."""
+    ids = {str(n.get("id")) for n in _graph_nodes(project_dir) if n.get("id")}
     if node in ids:
         return node
     func_ids = sorted(i for i in ids if i.startswith("func"))
@@ -65,7 +60,8 @@ def _validate_node_id(project_dir: Path, node: str) -> str:
 @click.option("--node", "-n", required=True, help="Graph node id to bind the finding to (validated against the graph)")
 @click.option("--contract", "-c", default=None, help="Contract name to scope the halmos run (optional)")
 @click.option("--property", "property_text", default=None, help="Human-readable property being checked")
-@click.option("--severity", default="high", help="Severity if violated: low/medium/high/critical (default: high)")
+@click.option("--severity", type=click.Choice(["low", "medium", "high", "critical"]), default="high",
+              help="Severity if violated (default: high)")
 @click.option("--timeout", default=240, type=int, help="Halmos timeout in seconds (default: 240)")
 @click.option("--no-confirm", is_flag=True, help="Record as supporting evidence only; leave confirmation to finalize")
 def verify(
@@ -87,8 +83,7 @@ def verify(
         sys.exit(1)
 
     project_dir = Path(project["path"])
-    graphs_dir = project_dir / "graphs"
-    if not graphs_dir.exists() or not list(graphs_dir.glob("*.json")):
+    if not list((project_dir / "graphs").glob("graph_*.json")):
         console.print("[red]No graphs found. Run 'hound graph build' first.[/red]")
         sys.exit(1)
 
@@ -96,29 +91,32 @@ def verify(
     prop = property_text or f"{function} holds"
 
     console.print(f"[bold cyan]Verifying[/bold cyan] {prop} on node [green]{node_id}[/green] via halmos...")
-    cex = run_halmos(workdir=workdir, function=function, contract=contract, timeout=timeout)
-    if cex is None:
-        console.print("[green]No counterexample (or halmos unavailable) -- nothing recorded.[/green]")
+    result = run_halmos(workdir=workdir, function=function, contract=contract, timeout=timeout)
+
+    if result.status == "error":
+        console.print(f"[red]Could not verify (no sound result): {result.detail}[/red]")
+        sys.exit(1)
+    if result.status == "held":
+        console.print("[green]Property holds: halmos ran and found no counterexample. Nothing recorded.[/green]")
         sys.exit(0)
 
-    console.print(f"[red]Counterexample found:[/red]\n{cex}")
-    store = HypothesisStore(project_dir / "hypotheses.json", agent_id="verify")
-    argv = f"halmos --function {function}" + (f" --contract {contract}" if contract else "")
+    console.print(f"[red]Counterexample found:[/red]\n{result.counterexample}")
+    store = HypothesisStore(project_dir / "hypotheses.json", agent_id="halmos")
+    replay = f"(in {workdir}) uvx halmos --function {function}" + (f" --contract {contract}" if contract else "")
     finding = HalmosFinding(
         property=prop,
         function=function,
         node_ref=node_id,
         severity=severity,
-        counterexample=cex,
-        argv=argv,
+        counterexample=result.counterexample,
+        argv=replay,
     )
     hyp_id, status = record_finding(store, finding, confirm=not no_confirm)
 
-    if not no_confirm and status != "confirmed":
-        console.print(f"[yellow]Warning:[/yellow] recorded {hyp_id} but status is '{status}', not confirmed "
-                      "(possible title/node collision with an existing hypothesis).")
-        sys.exit(0)
+    if status == "error" or (not no_confirm and status != "confirmed"):
+        console.print(f"[red]Failed to record the finding (store status: '{status}'). Nothing was persisted.[/red]")
+        sys.exit(1)
 
-    verb = "confirmed (verified by halmos)" if not no_confirm else "recorded as supporting evidence"
+    verb = "confirmed (verified by halmos)" if not no_confirm else f"recorded as supporting evidence (status: {status})"
     console.print(f"[bold green]Finding {hyp_id} {verb}.[/bold green]")
     sys.exit(0)

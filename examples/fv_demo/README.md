@@ -11,11 +11,11 @@ asserts the conservation law; Halmos returns a concrete counterexample.
 hound project create fvdemo examples/fv_demo/src
 hound graph build fvdemo --auto --files "MiniTokenBug.sol"
 
-# 2. confirm the conservation property by SOUND counterexample.
-#    --node is the function node from the built graph (e.g. `hound graph` output / graphs/graph_*.json)
+# 2. confirm the conservation property by SOUND counterexample. The graph builder names nodes
+#    itself, so pass the id it produced for the burn function (list ids in graphs/graph_*.json).
 hound verify fvdemo \
   --function check_invariant --workdir examples/fv_demo --contract Conservation \
-  --node func_MiniTokenBug_burn
+  --node "<the func_* id for MiniTokenBug.burn from your built graph>"
 
 # 3. the verified finding is now in the report like any other confirmed finding
 hound report fvdemo --format markdown

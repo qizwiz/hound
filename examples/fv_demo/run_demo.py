@@ -31,14 +31,17 @@ def main() -> int:
     subprocess.run(["forge", "build"], cwd=HERE, check=True, capture_output=True)
 
     print("== running halmos on check_invariant (totalSupply conservation) ==")
-    cex = run_halmos(workdir=str(HERE), function="check_invariant", contract="Conservation")
-    if cex is None:
+    result = run_halmos(workdir=str(HERE), function="check_invariant", contract="Conservation")
+    if result.status == "error":
+        print(f"halmos did not produce a sound result: {result.detail}")
+        return 1
+    if result.status == "held":
         print("halmos PASSED -> nothing recorded. The FV source never speculates.")
         return 0
-    print(f"halmos COUNTEREXAMPLE (sound witness):\n    {cex}\n")
+    print(f"halmos COUNTEREXAMPLE (sound witness):\n    {result.counterexample}\n")
 
     store_path = Path(tempfile.mkdtemp()) / "hypotheses.json"
-    store = HypothesisStore(store_path, agent_id="fv-demo")
+    store = HypothesisStore(store_path, agent_id="halmos")
 
     print("== recording the sound counterexample into hound's belief store ==")
     hyp_id, status = record_finding(
@@ -46,10 +49,10 @@ def main() -> int:
         HalmosFinding(
             property="totalSupply == sum(balances) across mint/burn",
             function="check_invariant",
-            node_ref="func_MiniTokenBug.burn",
+            node_ref="func_MiniTokenBug_burn",  # illustrative; the real id comes from the built graph
             severity="high",
-            counterexample=cex,
-            argv="halmos --function check_invariant --contract Conservation",
+            counterexample=result.counterexample,
+            argv="(in examples/fv_demo) uvx halmos --function check_invariant --contract Conservation",
         ),
         confirm=True,
     )

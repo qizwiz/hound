@@ -289,7 +289,12 @@ class HypothesisStore(ConcurrentFileStore):
                 return data, False
             hyp = data["hypotheses"][hypothesis_id]
             evidence.created_by = evidence.created_by or verifier_name
-            hyp["evidence"].append(asdict(evidence))
+            ev = asdict(evidence)
+            # idempotent: at most one witness per verifier on a hypothesis. Symbolic-witness variable
+            # names are non-deterministic across runs, so dedup on the verifier + evidence type, not text.
+            if not any(e.get("created_by") == ev["created_by"] and e.get("type") == ev["type"]
+                       for e in hyp.get("evidence", [])):
+                hyp["evidence"].append(ev)
             hyp["status"] = "confirmed"
             hyp["confidence"] = 1.0
             hyp["verified"] = True
