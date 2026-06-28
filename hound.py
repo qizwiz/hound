@@ -1112,6 +1112,33 @@ def finalize(
 
 
 @app.command()
+def verify(
+    project: str = typer.Argument(..., help="Project name"),
+    function: str = typer.Option(..., "--function", "-f", help="The halmos check_* function (e.g. check_invariant)"),
+    workdir: str = typer.Option(..., "--workdir", "-w", help="Foundry project dir containing the halmos test"),
+    node: str = typer.Option(..., "--node", "-n", help="Graph node id to bind the finding to"),
+    contract: str = typer.Option(None, "--contract", "-c", help="Contract name to scope the run"),
+    property_text: str = typer.Option(None, "--property", help="Human-readable property being checked"),
+    severity: str = typer.Option("high", "--severity", help="Severity if violated (low/medium/high/critical)"),
+    timeout: int = typer.Option(240, "--timeout", help="Halmos timeout in seconds"),
+    no_confirm: bool = typer.Option(False, "--no-confirm", help="Record as evidence only; leave confirm to finalize"),
+):
+    """Confirm a finding with a sound formal-verification (halmos) counterexample."""
+    from commands.verify import verify as verify_command
+    _invoke_click(verify_command, {
+        'project_name': project,
+        'function': function,
+        'workdir': workdir,
+        'node': node,
+        'contract': contract,
+        'property_text': property_text,
+        'severity': severity,
+        'timeout': timeout,
+        'no_confirm': no_confirm,
+    })
+
+
+@app.command()
 def report(
     project: str = typer.Argument(..., help="Project name"),
     output: str | None = typer.Option(None, "--output", "-o", help="Output file path"),

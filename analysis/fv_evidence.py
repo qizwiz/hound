@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 
@@ -60,12 +61,14 @@ def run_halmos(workdir: str, function: str, contract: str | None = None,
     None means 'no sound violation' -- callers then write nothing. A non-None return is a concrete
     witness, not a confidence.
     """
+    if shutil.which("uvx") is None:
+        return None  # halmos is an optional runtime tool; its absence is not a finding
     argv = ["uvx", "halmos", "--function", function]
     if contract:
         argv += ["--contract", contract]
     try:
         r = subprocess.run(argv, cwd=workdir, capture_output=True, text=True, timeout=timeout)
-    except Exception as e:  # noqa: BLE001 -- tool failure is not a finding
+    except Exception:  # tool failure / timeout is not a finding
         return None
     out = _ANSI.sub("", (r.stdout or "") + (r.stderr or ""))
     m = _CEX.search(out)

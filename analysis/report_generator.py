@@ -831,7 +831,9 @@ and systematic vulnerability assessment across all identified attack surfaces.""
                     'senior_model': hyp.get('senior_model'),
                     'supporting_evidence': hyp.get('supporting_evidence', []),
                     'properties': hyp.get('properties', {}),
-                    'qa_comment': hyp.get('qa_comment', '')  # Include QA comment if available
+                    'qa_comment': hyp.get('qa_comment', ''),  # Include QA comment if available
+                    'verified': hyp.get('verified', False),  # True when confirmed by a sound verifier (e.g. halmos)
+                    'verified_by': hyp.get('verified_by'),  # the verifier name, or None for LLM-confirmed findings
                 }
                 findings.append(finding)
         

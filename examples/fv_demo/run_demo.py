@@ -20,7 +20,7 @@ from pathlib import Path
 # make hound importable from the repo root
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from analysis.concurrent_knowledge import HypothesisStore           # noqa: E402
+from analysis.concurrent_knowledge import HypothesisStore  # noqa: E402
 from analysis.fv_evidence import HalmosFinding, record_finding, run_halmos  # noqa: E402
 
 HERE = Path(__file__).resolve().parent

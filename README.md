@@ -340,6 +340,19 @@ A reasoning model reviews all hypotheses and updates their status based on evide
 
 **Important:** By default, only `confirmed` findings appear in the final report. Use `--include-all` to include all hypotheses regardless of status.
 
+#### Optional: confirm by formal verification
+
+`finalize` confirms by LLM judgement. If you have a Halmos (symbolic EVM) check for a property, `hound verify` confirms by **sound counterexample** instead: it runs the check against a real graph node and, **only if Halmos finds a concrete violation**, records an auto-confirmed `verified` finding (tagged `verified_by: halmos`) in the same hypothesis store — so it flows into `hound report` like any other confirmed finding. On a passing check it records nothing.
+
+```bash
+# Foundry + halmos are optional runtime tools (not Hound dependencies)
+./hound.py verify myaudit \
+  --function check_invariant --workdir path/to/foundry-project \
+  --node func_Vault_withdraw --property "totalAssets conserved"
+```
+
+This is a second, distinct confirm channel — sound, never speculative — that leaves the LLM `finalize` gate untouched. It does **not** auto-generate Halmos checks; you supply the check. A runnable example is in [`examples/fv_demo/`](examples/fv_demo/).
+
 ### Step 7: Generate Proof-of-Concepts
 
 Create and manage proof-of-concept exploits for confirmed vulnerabilities:
