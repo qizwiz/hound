@@ -35,6 +35,8 @@ from analysis.concurrent_knowledge import Evidence, Hypothesis, HypothesisStore
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _CEX = re.compile(r"Counterexample:\s*\n?(.*?)(?:\n\s*\n|\n\s*\[|\n\s*Symbolic test result|\Z)", re.S)
 _WITNESS = re.compile(r"^\s*\S+\s*=\s*(?:0x[0-9a-fA-F]+|\d+)\s*$")
+# per-function result boundaries, used to scope a counterexample to its own function's block
+_BOUNDARY = re.compile(r"\[(?:FAIL|PASS)\]|Running \d+ test|Symbolic test result")
 
 
 @dataclass
@@ -67,9 +69,14 @@ def _extract_counterexample(out: str, function: str) -> str | None:
     if not fail:
         return None
     head = out[: fail.start()]
+    # scope to THIS function's block only: start after the previous result boundary, so a different
+    # function's counterexample (e.g. a sibling that FAILed earlier) is never attributed here.
+    start = 0
+    for b in _BOUNDARY.finditer(head):
+        start = b.end()
     block = None
-    for m in _CEX.finditer(head):
-        block = m  # the last counterexample before this function's FAIL line is its own
+    for m in _CEX.finditer(head[start:]):
+        block = m
     if not block:
         return None
     witness = [ln.strip() for ln in block.group(1).splitlines() if _WITNESS.match(ln)]
@@ -115,11 +122,13 @@ def run_halmos(workdir: str, function: str, contract: str | None = None,
     )
 
 
-def _existing_id_by_title(store: HypothesisStore, title: str) -> str | None:
-    """Recover the id of an existing hypothesis with this exact title (propose() dedups by title)."""
+def _existing_id_by_title(store: HypothesisStore, title: str, node_ref: str) -> str | None:
+    """Recover the id of the existing hypothesis with this exact title AND node. propose() dedups by
+    title only; requiring the node to match too means a verifier can never stamp an unrelated record
+    that merely happens to share a title."""
     low = title.lower()
     for h in store.list_all():
-        if (h.get("title") or "").lower() == low:
+        if (h.get("title") or "").lower() == low and node_ref in (h.get("node_refs") or []):
             return h.get("id")
     return None
 
@@ -156,7 +165,7 @@ def record_finding(store: HypothesisStore, finding: HalmosFinding, *, confirm: b
     else:
         # propose() rejected -- recover the EXISTING hypothesis id (it dedups by title), so we
         # augment/confirm the real record rather than a non-existent content hash.
-        hyp_id = _existing_id_by_title(store, hyp.title)
+        hyp_id = _existing_id_by_title(store, hyp.title, finding.node_ref)
         if hyp_id is None:
             return "", "error"
 
@@ -171,6 +180,12 @@ def record_finding(store: HypothesisStore, finding: HalmosFinding, *, confirm: b
         if store.confirm_from_verifier(hyp_id, evidence, verifier_name="halmos"):
             return hyp_id, "confirmed"
         return hyp_id, "error"
+    # --no-confirm path: add_evidence has no dedup, so keep this idempotent too (one verifier witness
+    # per hypothesis), since symbolic witness text is non-deterministic across runs.
+    existing = next((h for h in store.list_all() if h.get("id") == hyp_id), None)
+    if existing and any(e.get("created_by") == "halmos" and e.get("type") == evidence.type
+                        for e in (existing.get("evidence") or [])):
+        return hyp_id, _status_of(store, hyp_id)
     if not store.add_evidence(hyp_id, evidence):
         return hyp_id, "error"
     return hyp_id, _status_of(store, hyp_id)

@@ -76,6 +76,10 @@ def verify(
     no_confirm: bool,
 ):
     """Confirm a finding with a sound Halmos counterexample (formal-verification evidence source)."""
+    # Validate in the body too: hound.py's _invoke_click bypasses click's Choice parsing.
+    if severity not in ("low", "medium", "high", "critical"):
+        console.print(f"[red]Invalid --severity '{severity}' (choose low/medium/high/critical).[/red]")
+        sys.exit(1)
     manager = ProjectManager()
     project = manager.get_project(project_name)
     if not project:

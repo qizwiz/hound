@@ -100,6 +100,25 @@ class TestVerifyCommand(unittest.TestCase):
         self.assertEqual(self._run(node="func_MiniToken_mint").exit_code, 0)
         self.assertEqual(len(self._hyps()), 2)  # same property/function, different node -> two findings
 
+    @patch("commands.verify.run_halmos", return_value=VIOLATED)
+    @patch("commands.verify.ProjectManager")
+    def test_bad_severity_is_rejected(self, mock_pm, mock_halmos):
+        mock_pm.return_value.get_project.return_value = {"path": str(self.tmp)}
+        res = self._run(extra=["--severity", "BOGUS"])
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertEqual(self._hyps(), {})
+
+    @patch("commands.verify.run_halmos", return_value=VIOLATED)
+    @patch("commands.verify.ProjectManager")
+    def test_no_confirm_reverify_is_idempotent(self, mock_pm, _mock_halmos):
+        mock_pm.return_value.get_project.return_value = {"path": str(self.tmp)}
+        self.assertEqual(self._run(extra=["--no-confirm"]).exit_code, 0)
+        self.assertEqual(self._run(extra=["--no-confirm"]).exit_code, 0)
+        hyps = self._hyps()
+        self.assertEqual(len(hyps), 1)
+        halmos_ev = [e for e in next(iter(hyps.values()))["evidence"] if e.get("created_by") == "halmos"]
+        self.assertEqual(len(halmos_ev), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
